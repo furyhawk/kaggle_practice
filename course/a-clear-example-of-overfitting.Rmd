@@ -1,0 +1,267 @@
+---
+title: "A clear example of overfitting"
+author: "Osvaldo Zagordi"
+date: "21 October 2016"
+output: html_document
+---
+
+```{r my_setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(tidyverse)
+library(xgboost)
+library(Matrix)
+library(FeatureHashing)
+train <- read_csv('../input/train.csv')
+test <- read_csv('../input/test.csv')
+
+# adapted from https://susanejohnston.wordpress.com/2012/08/09/a-quick-and-easy-function-to-plot-lm-results-in-r/
+ggplotRegression <- function (fit) {
+m2p <- data.frame(fitted_values = fit$fitted.values, actual_values = fit$model[, 1])
+print(names(m2p))
+ggplot(m2p, aes(x = actual_values, y = fitted_values)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0) +
+  labs(title = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4)),
+       x = 'observed value', y = 'predicted value')
+}
+```
+
+This kernel presents two approaches to the prediction of house prices. The
+first one is a very simple linear fit on a small subset of _reasonable_ predicting
+variables.
+
+## A very simple fit
+
+We will use the area of the first and second floors, and the overall quality
+of the property, coded in a scale from one to ten. The idea here is just to
+have a feeling, also visually, of how much the score on the leaderboard
+translates into predicted-observed prices.
+
+```{r basic_linear_fit}
+# variable names starting with a number need a "`" to be escaped
+fit <- lm(SalePrice ~ (`1stFlrSF` + `2ndFlrSF`) * OverallQual + 1, data = train)
+ggplotRegression(fit)
+```
+
+The plot shows that, although very simple, this model is already able to
+capture some of the signal present in the data.
+
+A few words on the formula. An expression like `SalePrice ~ OverallQual + 1`
+must be read as: predict `SalePrice` as a function of `OverallQual` plus a
+constant term (the intercept). The formula we used reads
+
+    SalePrice ~ (`1stFlrSF` + `2ndFlrSF`) * OverallQual + 1.
+
+The bacticks around `1stFlrSF` and `2ndFlrSF` are used to correctly interpret
+variable names that begin with a number. The asterisk means that the model
+must include interactions as well, _i.e._
+
+    z ~ x * y
+
+means: predict `z` as a linear function of `x`, `y` and `x` times `y` and
+estimate the three coefficients. In mathematical formula, estimate
+$\alpha, \beta, \gamma$ in
+
+$$
+z = \alpha \cdot x + \beta \cdot y + \gamma \cdot x \cdot y
+$$
+
+In our case the linear model will estimate six coefficients: the intercept,
+one coefficient for each variable in `1stFlrSF`, `2ndFlrSF`, `OverallQual`,
+and two coefficients for the interactions `1stFlrSF:OverallQual` and
+`2ndFlrSF:OverallQual`.
+
+Let's retry but this time trying to predict the log of the sale price.
+
+```{r basic_linear_fit_log}
+train$log_price <- log(train$SalePrice)
+fit <- lm(log_price ~ (`1stFlrSF` + `2ndFlrSF`) * OverallQual + 1, data = train)
+ggplotRegression(fit)
+```
+
+Not a big difference, although $R^2$ has slightly increased (it is, anyway, not
+a great measure to evaluate regression models).
+
+We can use this model to predict on the test data and save this prediction.
+Don't forget to back-transform the log of the price; I also round to the closest
+500\$, since I have only observed values of the sale price that are multiple
+of 500.
+
+```{r basic_prediction}
+preds <- predict(fit, test)
+rpreds <- as.integer(round(exp(preds) / 500) * 500)
+data.frame(Id = test$Id, SalePrice = rpreds) %>%
+  write_csv(path = 'submission.csv')
+```
+
+This gives a score of 0.1873 on the leaderboard, while the sample submission
+gives 0.4089 and the top submission scores 0.1 (as of Oct 21st). Not bad
+for such a simple model, but definitely too simple for Kaggle.
+
+## Cleaning the data and simple feature engineering
+
+We now prepare the data for learning with xgboost, the different steps are
+commented in the code. In short:
+
+- we save a vector with the log of the prices to
+  use it later as a label,
+- we rename the variables that start with a number to
+  avoid confusion,
+- remove a summary variable that is mislabeled,
+- change `NA`s to `None` when the meaning is clear.
+
+```{r feat_eng}
+train_label <- train$log_price
+train$SalePrice <- NULL
+train$log_price <- NULL
+# we save Id for the submission, but it's not used to predict
+testids <- test$Id
+test$Id <- NULL
+train$Id <- NULL
+
+row_train <- nrow(train)
+row_test <- nrow(test)
+all_rows <- rbind(train, test) %>%
+  # first character name is a number, but this is still NSE
+  rename(FirstFlrSF = `1stFlrSF`,
+         SecondFlrSF = `2ndFlrSF`,
+         ThreeSeasonPorch = `3SsnPorch`) %>%
+  # MSSubClass is sometimes mislabeled and is anyway a summary of other features
+  select(-MSSubClass)
+
+# no access to alley, no basement and so on are coded as NA
+mask <- is.na(all_rows$Alley)
+all_rows$Alley[mask] <- 'None'
+mask <- is.na(all_rows$BsmtQual)
+all_rows$BsmtQual[mask] <- 'NoBasement'
+mask <- is.na(all_rows$BsmtExposure)
+all_rows$BsmtExposure[mask] <- 'NoBasement'
+mask <- is.na(all_rows$PoolQC)
+all_rows$PoolQC[mask] <- 'NoPool'
+mask <- is.na(all_rows$Fence)
+all_rows$Fence[mask] <- 'NoFence'
+mask <- is.na(all_rows$GarageType)
+all_rows$GarageType[mask] <- 'NoGarage'
+mask <- is.na(all_rows$GarageCond)
+all_rows$GarageCond[mask] <- 'NoGarage'
+mask <- is.na(all_rows$GarageArea)
+all_rows$GarageArea[mask] <- 0
+mask <- is.na(all_rows$GarageCars)
+all_rows$GarageCars[mask] <- 0
+# LotFrontage: Linear feet of street connected to property
+# NA -> 0
+mask <- is.na(all_rows$LotFrontage)
+all_rows$LotFrontage[mask] <- 0
+
+#rm(train, test)
+```
+Now we can compute the matrix to use in xgboost. At least for this simple
+approach, we exclude columns with `NA`s by applying `anyNA` on
+all columns and transposing to extract the column names. This is conveniently
+done with functions from `tidyverse`.
+
+```{r hashed_matrix}
+# detect which columns have NAs with base function anyNA
+nonas <- all_rows %>%
+  summarise_each(funs(anyNA)) %>%
+  # this transposes
+  mutate(group = 1) %>%
+  gather(var, val, 1:ncol(all_rows)) %>%
+  select(-group) %>%
+  filter(val == FALSE)
+# indices of columns without NAs
+nona_indices <- which(colnames(all_rows) %in% nonas$var)
+
+# detect which columns are character
+charcol <- all_rows %>%
+  summarise_each(funs(is.character)) %>%
+  # this transposes
+  mutate(group = 1) %>%
+  gather(var, val, 1:ncol(all_rows)) %>%
+  select(-group) %>%
+  filter(val == TRUE)
+char_indices <- which(colnames(all_rows) %in% charcol$var)
+
+# no NAs and not characters
+num_no_nas_indices <- setdiff(nona_indices, char_indices)
+
+# no NAs and characters
+char_no_nas_indices <- intersect(nona_indices, char_indices)
+
+# use only columns without NAs
+hashed_matrix = hashed.model.matrix(~., data=all_rows[,nona_indices], hash.size=2^12, transpose=FALSE)
+hashed_matrix = as(hashed_matrix, "dgCMatrix")
+```
+
+We are ready to feed this matrices into xgboost, but we will now make a small
+experiment to show a magnificent case of overfitting. We will split the training
+set in two subsets of equal (or almost equal) size: a holdout set and a training set.
+
+```{r dmatrices}
+# we are assuming training set is already in random order so no need to shuffle
+row_holdout <- round(row_train / 2)
+dholdout <- xgb.DMatrix(data = hashed_matrix[1:row_holdout,],
+                        label = train_label[1:row_holdout])
+dtrain <- xgb.DMatrix(data = hashed_matrix[(1 + row_holdout):row_train,],
+                      label = train_label[(1 + row_holdout):row_train])
+dtest <- xgb.DMatrix(data = hashed_matrix[(1 + row_train):(row_train + row_test),])
+```
+
+We now use the training set to train the model and we save the rmse obtained.
+
+```{r}
+param <- list(eval_metric = "rmse",
+              booster = "gbtree"
+)
+
+m2 <- xgb.train(data = dtrain,
+                param,
+                nrounds = 300,
+                watchlist = list(train = dtrain),
+                print_every_n = 100)
+```
+
+Without optimizing the parameters, we obtain a rmse lower than 1E-3, a lot better
+than the top submission on the leaderboard. How does this translates visually?
+
+```{r plot_train}
+data.frame(predicted = exp(predict(m2, dtrain)),
+              observed = exp(train_label[(1 + row_holdout):row_train])) %>%
+  ggplot(aes(x = observed, y = predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0) +
+  labs(title = "Training and prediction on the same set (training)",
+       x = 'observed value', y = 'predicted value')
+
+```
+
+Extremely good fit!
+
+Let's now use the trained model to predict on the holdout set, compute the rmse
+and plot.
+
+```{r predict_on_holdout}
+ho_preds <- predict(m2, dholdout)
+delta <- ho_preds - train_label[1:row_holdout]
+rmse <- sqrt(mean(delta^2))
+paste('rmse =', rmse)
+data.frame(predicted = exp(ho_preds),
+           observed = exp(train_label[1:row_holdout])) %>%
+  ggplot(aes(x = observed, y = predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0) +
+  labs(title = "Training on the training set, prediction on the holdout set",
+       x = 'observed value', y = 'predicted value')
+```
+
+rmse is now 0.155 and it is also seen on the plot that the prediction is
+not that good, after all. Further, it will be worth investigating those
+outliers.
+
+```{r predict_on_test}
+preds <- predict(m2, dtest)
+rpreds <- as.integer(round(exp(preds) / 500) * 500)
+data.frame(Id = testids, SalePrice = rpreds) %>%
+  write_csv(path = 'submission_xgb.csv')
+```
+
