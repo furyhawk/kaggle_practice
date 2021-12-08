@@ -1,0 +1,22 @@
+{
+  "id": "teckmengwong/simplenn-logisticreg",
+  "id_no": 22455476,
+  "title": "SimpleNN_LogisticReg",
+  "code_file": "simplenn-logisticreg.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "keywords": [
+    "deep learning",
+    "tensorflow",
+    "logistic regression",
+    "keras"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [
+    "c/tabular-playground-series-dec-2021"
+  ]
+}
