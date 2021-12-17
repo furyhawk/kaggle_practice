@@ -1,0 +1,22 @@
+name: text 
+  
+channels:
+  - conda-forge
+  
+dependencies:
+  - python=3.9
+    
+  - pandas
+  - scikit-learn
+  - matplotlib 
+  - seaborn
+  - jupyterlab 
+  - ipywidgets
+  - imbalanced-learn
+  
+  - pip
+
+  - pip:
+    # add pip-distributed libraries
+    - tensorflow
+

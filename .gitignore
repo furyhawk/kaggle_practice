@@ -115,4 +115,7 @@ dmypy.json
 
 input/
 structured_data_classifier/
+my_dir/
+my_project/
+kt_softmax/
 .idea/
