@@ -1,4 +1,4 @@
-name: text 
+name: tf27
   
 channels:
   - conda-forge
